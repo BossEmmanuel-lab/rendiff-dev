@@ -1,0 +1,111 @@
+name: rendiff
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rendiff
+      POSTGRES_USER: rendiff_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - rendiff-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rendiff_user -d rendiff"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7.2-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - rendiff-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    command: ["/app/scripts/docker-entrypoint.sh", "migrate"]
+    environment:
+      DATABASE_URL: postgresql://rendiff_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/rendiff
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rendiff-net
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://rendiff_user:${POSTGRES_PASSWORD}@postgres:5432/rendiff
+      REDIS_URL: redis://redis:6379/0
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      API_WORKERS: "2"
+      ENABLE_API_KEYS: "true"
+      LOG_LEVEL: info
+    volumes:
+      - storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - rendiff-net
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+      args:
+        WORKER_TYPE: cpu
+    environment:
+      DATABASE_URL: postgresql://rendiff_user:${POSTGRES_PASSWORD}@postgres:5432/rendiff
+      REDIS_URL: redis://redis:6379/0
+      WORKER_TYPE: cpu
+      WORKER_CONCURRENCY: "2"
+      LOG_LEVEL: info
+    volumes:
+      - storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rendiff-net
+    restart: unless-stopped
+
+networks:
+  rendiff-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  storage:
